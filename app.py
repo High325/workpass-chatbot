@@ -87,12 +87,24 @@ def initialize_rag_engine():
     """Initialize RAG engine if not already initialized"""
     if st.session_state.rag_engine is None:
         try:
-            with st.spinner("Loading knowledge base..."):
-                st.session_state.rag_engine = RAGEngine()
+            # Check if we need to build the knowledge base
+            vector_db_path = Path("./chroma_db")
+            processed_file = Path("processed_knowledge_base.json")
+            
+            if not vector_db_path.exists() and processed_file.exists():
+                # Show a more informative message for auto-build
+                with st.spinner("Building knowledge base from processed data (this may take a few minutes on first run)..."):
+                    st.session_state.rag_engine = RAGEngine(auto_build=True)
+            else:
+                with st.spinner("Loading knowledge base..."):
+                    st.session_state.rag_engine = RAGEngine(auto_build=True)
             return True
         except Exception as e:
             st.error(f"Error initializing RAG engine: {str(e)}")
-            st.info("Please ensure you have built the knowledge base by running: `python knowledge_base/builder.py`")
+            if "processed_knowledge_base.json" in str(e):
+                st.info("Please ensure processed_knowledge_base.json exists in the project root.")
+            else:
+                st.info("If the knowledge base needs to be built, ensure processed_knowledge_base.json exists, or run: `python knowledge_base/builder.py`")
             return False
     return True
 

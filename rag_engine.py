@@ -2,6 +2,8 @@
 RAG (Retrieval-Augmented Generation) engine for the chatbot
 """
 import os
+import sys
+from pathlib import Path
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_chroma import Chroma
 from langchain_core.prompts import PromptTemplate
@@ -18,8 +20,13 @@ logger = logging.getLogger(__name__)
 class RAGEngine:
     """RAG engine for retrieving and generating responses about Singapore work passes"""
     
-    def __init__(self):
-        """Initialize RAG engine with vector store and LLM"""
+    def __init__(self, auto_build: bool = True):
+        """
+        Initialize RAG engine with vector store and LLM
+        
+        Args:
+            auto_build: If True, automatically build knowledge base if it doesn't exist
+        """
         try:
             # Initialize embeddings
             self.embeddings = OpenAIEmbeddings(
@@ -27,18 +34,24 @@ class RAGEngine:
                 openai_api_key=config.OPENAI_API_KEY
             )
             
-            # Load vector database
+            # Load or build vector database
             if not os.path.exists(config.VECTOR_DB_PATH):
-                raise FileNotFoundError(
-                    f"Vector database not found at {config.VECTOR_DB_PATH}. "
-                    "Please run knowledge_base/builder.py first."
-                )
+                if auto_build:
+                    logger.info("Vector database not found. Attempting to build from processed data...")
+                    self._auto_build_knowledge_base()
+                else:
+                    raise FileNotFoundError(
+                        f"Vector database not found at {config.VECTOR_DB_PATH}. "
+                        "Please run knowledge_base/builder.py first."
+                    )
             
-            self.vector_store = Chroma(
-                persist_directory=config.VECTOR_DB_PATH,
-                embedding_function=self.embeddings,
-                collection_name=config.COLLECTION_NAME
-            )
+            # Load vector store (either newly created or existing)
+            if not hasattr(self, 'vector_store') or self.vector_store is None:
+                self.vector_store = Chroma(
+                    persist_directory=config.VECTOR_DB_PATH,
+                    embedding_function=self.embeddings,
+                    collection_name=config.COLLECTION_NAME
+                )
             
             # Initialize LLM
             self.llm = ChatOpenAI(
@@ -85,6 +98,91 @@ Answer:"""
         except Exception as e:
             logger.error(f"Error initializing RAG engine: {str(e)}")
             raise
+    
+    def _auto_build_knowledge_base(self):
+        """Automatically build knowledge base from processed_knowledge_base.json if available"""
+        processed_file = "processed_knowledge_base.json"
+        
+        if not os.path.exists(processed_file):
+            raise FileNotFoundError(
+                f"Vector database not found and {processed_file} is also missing. "
+                "Please ensure processed_knowledge_base.json exists in the project root, "
+                "or run knowledge_base/builder.py to create it."
+            )
+        
+        try:
+            # Import builder components
+            from knowledge_base.processor import DataProcessor
+            import json
+            import time
+            
+            logger.info(f"Loading processed data from {processed_file}...")
+            
+            # Load processed chunks
+            processor = DataProcessor()
+            processed_chunks = processor.load_from_json(processed_file)
+            
+            logger.info(f"Found {len(processed_chunks)} processed chunks. Creating vector database...")
+            
+            # Convert to LangChain Documents
+            documents = []
+            for chunk in processed_chunks:
+                # Clean metadata - convert complex types to strings
+                metadata = chunk['metadata'].copy()
+                
+                # Convert headings list to string if it exists
+                if 'headings' in metadata and isinstance(metadata['headings'], list):
+                    headings_str = "; ".join([f"{h.get('level', '')}: {h.get('text', '')}" for h in metadata['headings']])
+                    metadata['headings'] = headings_str
+                
+                # Filter out any remaining complex metadata types
+                cleaned_metadata = {}
+                for key, value in metadata.items():
+                    if isinstance(value, (str, int, float, bool)) or value is None:
+                        cleaned_metadata[key] = value
+                    elif isinstance(value, list):
+                        cleaned_metadata[key] = json.dumps(value) if value else ""
+                    elif isinstance(value, dict):
+                        cleaned_metadata[key] = json.dumps(value)
+                
+                doc = Document(
+                    page_content=chunk['text'],
+                    metadata=cleaned_metadata
+                )
+                documents.append(doc)
+            
+            # Create vector store with retry logic for rate limits
+            max_retries = 3
+            retry_delay = 5  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"Creating vector database (attempt {attempt + 1}/{max_retries})...")
+                    self.vector_store = Chroma.from_documents(
+                        documents=documents,
+                        embedding=self.embeddings,
+                        persist_directory=config.VECTOR_DB_PATH,
+                        collection_name=config.COLLECTION_NAME
+                    )
+                    logger.info(f"Successfully created vector database with {len(documents)} documents")
+                    break
+                except Exception as e:
+                    if "429" in str(e) or "rate" in str(e).lower() or "quota" in str(e).lower():
+                        if attempt < max_retries - 1:
+                            logger.warning(f"Rate limit hit. Waiting {retry_delay} seconds before retry...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                        else:
+                            raise Exception(f"Failed after {max_retries} attempts due to rate limits. Please check your OpenAI API quota.")
+                    else:
+                        raise
+            
+        except Exception as e:
+            logger.error(f"Error auto-building knowledge base: {str(e)}")
+            raise Exception(
+                f"Failed to auto-build knowledge base: {str(e)}. "
+                "Please run 'python knowledge_base/builder.py --from-file processed_knowledge_base.json' manually."
+            )
     
     def query(self, question: str, user_context: Dict = None) -> Dict:
         """

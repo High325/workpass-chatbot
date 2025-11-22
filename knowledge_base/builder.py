@@ -11,7 +11,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 from knowledge_base.scraper import MOMScraper
 from knowledge_base.processor import DataProcessor
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from typing import List, Dict
 import config
